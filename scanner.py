@@ -96,35 +96,131 @@ def push(text):
     urllib.request.urlopen(req,timeout=30).read()
 
 def main():
-    rows=load_rows(); items=[]
-    with open(ITEMS,encoding="utf-8-sig",newline="") as f: items=list(csv.DictReader(f))
-    for n,it in enumerate(items,1):
-        try: rows=merge_api(rows,it["marketHashName"],it["group"],request_item(it["marketHashName"]))
-        except Exception as e: print(f"WARN {it['marketHashName']}: {e}",file=sys.stderr)
-        if n%50==0: print(f"fetched {n}/{len(items)}")
-    os.makedirs(os.path.dirname(RAW) or ".",exist_ok=True)
-    with open(RAW,"w",encoding="utf-8-sig",newline="") as f:
-        w=csv.DictWriter(f,fieldnames=["marketHashName","group","date","timestamp","v1","v2","v3","v4"]); w.writeheader()
-        for r in sorted(rows, key=lambda x: (x["marketHashName"], x["date"])):
-            w.writerow({
-                "marketHashName": r["marketHashName"],
-                "group": r["group"],
-                "date": r["date"],
-                "timestamp": r["timestamp"],
-                "v1": r["open"],
-                "v2": r["close"],
-                "v3": r["high"],
-                "v4": r["low"],
+    rows = load_rows()
+    items = []
+
+    with open(ITEMS, encoding="utf-8-sig", newline="") as f:
+        items = list(csv.DictReader(f))
+
+    for n, item in enumerate(items, 1):
+        try:
+            rows = merge_api(
+                rows,
+                item["marketHashName"],
+                item["group"],
+                request_item(item["marketHashName"])
+            )
+        except Exception as e:
+            print(
+                f"WARN {item['marketHashName']}: {e}",
+                file=sys.stderr
+            )
+
+        if n % 50 == 0:
+            print(f"fetched {n}/{len(items)}")
+
+    os.makedirs(os.path.dirname(RAW) or ".", exist_ok=True)
+
+    with open(RAW, "w", encoding="utf-8-sig", newline="") as f:
+        fieldnames = [
+            "marketHashName",
+            "group",
+            "date",
+            "timestamp",
+            "v1",
+            "v2",
+            "v3",
+            "v4",
+        ]
+
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for row in sorted(
+            rows,
+            key=lambda x: (
+                x["marketHashName"],
+                x["date"]
+            )
+        ):
+            writer.writerow({
+                "marketHashName": row["marketHashName"],
+                "group": row["group"],
+                "date": row["date"],
+                "timestamp": row["timestamp"],
+                "v1": row["open"],
+                "v2": row["close"],
+                "v3": row["high"],
+                "v4": row["low"],
             })
 
-    latest = max(r["date"] for r in rows)
+    if not rows:
+        raise RuntimeError("No K-line data received")
+
+    latest = max(row["date"] for row in rows)
     found = []
-        g=sorted([r for r in rows if r["marketHashName"]==name],key=lambda x:x["date"])
-        if g[-1]["date"]!=latest or len(g)<300: continue
-        types=signal_types(g)
-        if len(types)>=2 and 30<=g[-1]["close"]<=13000: found.append((name,g[0]["group"],g[-1]["close"],types))
+
+    names = {
+        row["marketHashName"]
+        for row in rows
+    }
+
+    for name in names:
+        group_rows = [
+            row
+            for row in rows
+            if row["marketHashName"] == name
+        ]
+
+        group_rows = sorted(
+            group_rows,
+            key=lambda x: x["date"]
+        )
+
+        if len(group_rows) < 300:
+            continue
+
+        if group_rows[-1]["date"] != latest:
+            continue
+
+        types = signal_types(group_rows)
+
+        if (
+            len(types) >= 2
+            and 30 <= group_rows[-1]["close"] <= 13000
+        ):
+            found.append((
+                name,
+                group_rows[0]["group"],
+                group_rows[-1]["close"],
+                types,
+            ))
+
     if found:
-        msg=f"CS2 扫盘 {latest}\n去除刀皮｜双/三买点共振\n"+"\n".join(f"{n}｜{grp}｜{p:.2f}\n  {' + '.join(t)}（{len(t)}买点）" for n,grp,p,t in found)
-    else: msg=f"CS2 扫盘 {latest}\n未发现满足条件的双/三买点共振。"
-    print(msg); push(msg)
-if __name__ == "__main__": main()
+        lines = [
+            f"CS2 扫盘 {latest}",
+            "去除刀皮｜双/三买点共振",
+            "",
+        ]
+
+        for name, group, price, types in found:
+            lines.append(
+                f"{name}｜{group}｜{price:.2f}"
+            )
+            lines.append(
+                f"  {' + '.join(types)}（{len(types)}买点）"
+            )
+
+        message = "\n".join(lines)
+    else:
+        message = (
+            f"CS2 扫盘 {latest}\n"
+            "未发现满足条件的双/三买点共振。"
+        )
+
+    print(message)
+    push(message)
+
+
+if __name__ == "__main__":
+    main()
