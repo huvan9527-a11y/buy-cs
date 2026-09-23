@@ -105,8 +105,17 @@ def main():
     os.makedirs(os.path.dirname(RAW) or ".",exist_ok=True)
     with open(RAW,"w",encoding="utf-8-sig",newline="") as f:
         w=csv.DictWriter(f,fieldnames=["marketHashName","group","date","timestamp","v1","v2","v3","v4"]); w.writeheader()
-        for r in sorted(rows,key=lambda x:(x["marketHashName"],x["date"])): w.writerow({**r,"v1":r["open"],"v2":r["close"],"v3":r["high"],"v4":r["low"]})
-    latest=max(r["date"] for r in rows); found=[]
+for r in sorted(rows, key=lambda x: (x["marketHashName"], x["date"])):
+    w.writerow({
+        "marketHashName": r["marketHashName"],
+        "group": r["group"],
+        "date": r["date"],
+        "timestamp": r["timestamp"],
+        "v1": r["open"],
+        "v2": r["close"],
+        "v3": r["high"],
+        "v4": r["low"],
+    })    latest=max(r["date"] for r in rows); found=[]
     for name in {r["marketHashName"] for r in rows}:
         g=sorted([r for r in rows if r["marketHashName"]==name],key=lambda x:x["date"])
         if g[-1]["date"]!=latest or len(g)<300: continue
