@@ -7,7 +7,7 @@ The API authentication mode is configurable via STEAMDT_AUTH_MODE.
 import csv, json, os, sys, time, urllib.request, urllib.error, urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 API_HOST = os.getenv("STEAMDT_API_HOST", "https://open.steamdt.com")
 API_PATH = os.getenv("STEAMDT_API_PATH", "/open/cs2/item/v1/kline")
@@ -48,7 +48,8 @@ def merge_api(rows, name, group, values):
     by={(r["marketHashName"],r["date"]):r for r in rows}
     for a in values:
         if not isinstance(a,(list,tuple)) or len(a)<5: continue
-        ts=int(a[0]); dt=datetime.utcfromtimestamp(ts).date().isoformat()
+        ts = int(a[0])
+        dt = datetime.fromtimestamp(ts, timezone.utc).date().isoformat()
         try: vals=list(map(float,a[1:5]))
         except (TypeError,ValueError): continue
         by[(name,dt)]={"marketHashName":name,"group":group,"date":dt,"timestamp":str(ts),"open":vals[0],"close":vals[1],"high":vals[2],"low":vals[3]}
@@ -139,33 +140,54 @@ def main():
         if item.get("group") != "knife_FN"
     ]
 
-    def fetch_one(item):
-        return item, request_item(item["marketHashName"])
-
     total = len(items)
     print(f"items to fetch: {total}")
 
-    # 并发请求，避免 2000 多个饰品顺序请求耗时过长
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        futures = [
-            executor.submit(fetch_one, item)
-            for item in items
-        ]
+    # K线接口限制为每分钟 120 次。
+    # 单线程每次间隔 0.60 秒，控制在每分钟约 100 次，避免触发 4005。
+    last_request = 0.0
 
-        for n, future in enumerate(as_completed(futures), 1):
-            try:
-                item, data = future.result()
-                rows = merge_api(
-                    rows,
-                    item["marketHashName"],
-                    item["group"],
-                    data,
-                )
-            except Exception as e:
-                print(f"WARN fetch failed: {e}", file=sys.stderr)
+    for n, item in enumerate(items, 1):
+        wait = 0.60 - (time.monotonic() - last_request)
+        if wait > 0:
+            time.sleep(wait)
 
-            if n % 50 == 0 or n == total:
-                print(f"fetched {n}/{total}")
+        last_request = time.monotonic()
+
+        try:
+            data = request_item(item["marketHashName"])
+            rows = merge_api(
+                rows,
+                item["marketHashName"],
+                item["group"],
+                data,
+            )
+        except Exception as e:
+            message = str(e)
+            print(
+                f"WARN fetch failed for {item['marketHashName']}: {message}",
+                file=sys.stderr,
+            )
+
+            # 如果接口刚好返回 4005，等待一个完整限流窗口后重试一次。
+            if "4005" in message:
+                time.sleep(65)
+                try:
+                    data = request_item(item["marketHashName"])
+                    rows = merge_api(
+                        rows,
+                        item["marketHashName"],
+                        item["group"],
+                        data,
+                    )
+                except Exception as retry_error:
+                    print(
+                        f"WARN retry failed for {item['marketHashName']}: {retry_error}",
+                        file=sys.stderr,
+                    )
+
+        if n % 50 == 0 or n == total:
+            print(f"fetched {n}/{total}")
 
     if not rows:
         raise RuntimeError("No K-line data received")
