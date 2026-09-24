@@ -55,6 +55,28 @@ def merge_api(rows, name, group, values):
         by[(name,dt)]={"marketHashName":name,"group":group,"date":dt,"timestamp":str(ts),"open":vals[0],"close":vals[1],"high":vals[2],"low":vals[3]}
     return list(by.values())
 
+def merge_into_index(by, name, group, values):
+    for a in values:
+        if not isinstance(a, (list, tuple)) or len(a) < 5:
+            continue
+        try:
+            ts = int(a[0])
+            vals = list(map(float, a[1:5]))
+        except (TypeError, ValueError):
+            continue
+        dt = datetime.fromtimestamp(ts, timezone.utc).date().isoformat()
+        by[(name, dt)] = {
+            "marketHashName": name,
+            "group": group,
+            "date": dt,
+            "timestamp": str(ts),
+            "open": vals[0],
+            "close": vals[1],
+            "high": vals[2],
+            "low": vals[3],
+        }
+
+
 def cross(a,b,i): return i>0 and a[i]>b[i] and a[i-1]<=b[i-1]
 def ema(xs, span):
     k=2/(span+1); out=[xs[0]]
@@ -131,6 +153,12 @@ def main():
         if row.get("group") != "knife_FN"
     ]
 
+    # 建立索引，避免每请求一件饰品都重新遍历全部历史数据。
+    row_index = {
+        (row["marketHashName"], row["date"]): row
+        for row in rows
+    }
+
     with open(ITEMS, encoding="utf-8-sig", newline="") as f:
         items = list(csv.DictReader(f))
 
@@ -156,8 +184,8 @@ def main():
 
         try:
             data = request_item(item["marketHashName"])
-            rows = merge_api(
-                rows,
+            merge_into_index(
+                row_index,
                 item["marketHashName"],
                 item["group"],
                 data,
@@ -174,8 +202,8 @@ def main():
                 time.sleep(65)
                 try:
                     data = request_item(item["marketHashName"])
-                    rows = merge_api(
-                        rows,
+                    merge_into_index(
+                        row_index,
                         item["marketHashName"],
                         item["group"],
                         data,
@@ -188,6 +216,8 @@ def main():
 
         if n % 50 == 0 or n == total:
             print(f"fetched {n}/{total}")
+
+    rows = list(row_index.values())
 
     if not rows:
         raise RuntimeError("No K-line data received")
