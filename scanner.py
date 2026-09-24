@@ -6,6 +6,7 @@ The API authentication mode is configurable via STEAMDT_AUTH_MODE.
 """
 import csv, json, os, sys, time, urllib.request, urllib.error, urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import Counter
 from datetime import date, datetime
 
 API_HOST = os.getenv("STEAMDT_API_HOST", "https://open.steamdt.com")
@@ -89,12 +90,36 @@ def signal_types(g):
     return list(dict.fromkeys(out))
 
 def push(text):
-    token=API_KEY # never use API key as Telegram token
-    tg=os.environ.get("TELEGRAM_BOT_TOKEN"); chat=os.environ.get("TELEGRAM_CHAT_ID")
-    if not tg or not chat: print(text); return
-    body=urllib.parse.urlencode({"chat_id":chat,"text":text}).encode()
-    req=urllib.request.Request(f"https://api.telegram.org/bot{tg}/sendMessage",data=body,method="POST")
-    urllib.request.urlopen(req,timeout=30).read()
+    tg = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat = os.environ.get("TELEGRAM_CHAT_ID")
+    if not tg or not chat:
+        print(text)
+        return
+
+    # Telegram 单条消息有长度限制，按行拆分，避免买点多时发送失败。
+    chunks = []
+    current = ""
+    for line in text.splitlines(True):
+        if len(current) + len(line) > 3800:
+            if current:
+                chunks.append(current)
+            current = line
+        else:
+            current += line
+    if current:
+        chunks.append(current)
+
+    for chunk in chunks:
+        body = urllib.parse.urlencode({
+            "chat_id": chat,
+            "text": chunk,
+        }).encode()
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{tg}/sendMessage",
+            data=body,
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=30).read()
 
 def main():
     rows = load_rows()
@@ -121,7 +146,7 @@ def main():
     print(f"items to fetch: {total}")
 
     # 并发请求，避免 2000 多个饰品顺序请求耗时过长
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with ThreadPoolExecutor(max_workers=8) as executor:
         futures = [
             executor.submit(fetch_one, item)
             for item in items
@@ -176,7 +201,24 @@ def main():
                 "v4": row["low"],
             })
 
-    latest = max(row["date"] for row in rows)
+    # 选择大多数饰品共同拥有的最新日期，避免某个饰品多一天数据
+    # 导致其他饰品全部被跳过。
+    latest_by_item = {}
+    for row in rows:
+        if row.get("group") == "knife_FN":
+            continue
+        name = row["marketHashName"]
+        if name not in latest_by_item or row["date"] > latest_by_item[name]:
+            latest_by_item[name] = row["date"]
+
+    if not latest_by_item:
+        raise RuntimeError("No valid item dates found")
+
+    date_counts = Counter(latest_by_item.values())
+    latest = date_counts.most_common(1)[0][0]
+    print(f"scan date: {latest}")
+    print(f"items by date: {date_counts.most_common(5)}")
+
     found = []
 
     names = {
