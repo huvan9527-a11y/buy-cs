@@ -5,6 +5,7 @@ Uses the confirmed SteamDT candle order: [timestamp, open, close, high, low].
 The API authentication mode is configurable via STEAMDT_AUTH_MODE.
 """
 import csv, json, os, sys, time, urllib.request, urllib.error, urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 
 API_HOST = os.getenv("STEAMDT_API_HOST", "https://open.steamdt.com")
@@ -97,27 +98,52 @@ def push(text):
 
 def main():
     rows = load_rows()
-    items = []
+
+    # 排除历史数据中的全部刀皮
+    rows = [
+        row for row in rows
+        if row.get("group") != "knife_FN"
+    ]
 
     with open(ITEMS, encoding="utf-8-sig", newline="") as f:
         items = list(csv.DictReader(f))
 
-    for n, item in enumerate(items, 1):
-        try:
-            rows = merge_api(
-                rows,
-                item["marketHashName"],
-                item["group"],
-                request_item(item["marketHashName"])
-            )
-        except Exception as e:
-            print(
-                f"WARN {item['marketHashName']}: {e}",
-                file=sys.stderr
-            )
+    # API 请求也排除刀皮
+    items = [
+        item for item in items
+        if item.get("group") != "knife_FN"
+    ]
 
-        if n % 50 == 0:
-            print(f"fetched {n}/{len(items)}")
+    def fetch_one(item):
+        return item, request_item(item["marketHashName"])
+
+    total = len(items)
+    print(f"items to fetch: {total}")
+
+    # 并发请求，避免 2000 多个饰品顺序请求耗时过长
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(fetch_one, item)
+            for item in items
+        ]
+
+        for n, future in enumerate(as_completed(futures), 1):
+            try:
+                item, data = future.result()
+                rows = merge_api(
+                    rows,
+                    item["marketHashName"],
+                    item["group"],
+                    data,
+                )
+            except Exception as e:
+                print(f"WARN fetch failed: {e}", file=sys.stderr)
+
+            if n % 50 == 0 or n == total:
+                print(f"fetched {n}/{total}")
+
+    if not rows:
+        raise RuntimeError("No K-line data received")
 
     os.makedirs(os.path.dirname(RAW) or ".", exist_ok=True)
 
@@ -132,16 +158,12 @@ def main():
             "v3",
             "v4",
         ]
-
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
 
         for row in sorted(
             rows,
-            key=lambda x: (
-                x["marketHashName"],
-                x["date"]
-            )
+            key=lambda x: (x["marketHashName"], x["date"]),
         ):
             writer.writerow({
                 "marketHashName": row["marketHashName"],
@@ -154,27 +176,23 @@ def main():
                 "v4": row["low"],
             })
 
-    if not rows:
-        raise RuntimeError("No K-line data received")
-
     latest = max(row["date"] for row in rows)
     found = []
 
     names = {
         row["marketHashName"]
         for row in rows
+        if row.get("group") != "knife_FN"
     }
 
     for name in names:
-        group_rows = [
-            row
-            for row in rows
-            if row["marketHashName"] == name
-        ]
-
         group_rows = sorted(
-            group_rows,
-            key=lambda x: x["date"]
+            [
+                row for row in rows
+                if row["marketHashName"] == name
+                and row.get("group") != "knife_FN"
+            ],
+            key=lambda x: x["date"],
         )
 
         if len(group_rows) < 300:
@@ -185,8 +203,9 @@ def main():
 
         types = signal_types(group_rows)
 
+        # 单买点、双买点、三买点全部推送；价格范围为 30–13000
         if (
-            len(types) >= 2
+            len(types) >= 1
             and 30 <= group_rows[-1]["close"] <= 13000
         ):
             found.append((
@@ -197,25 +216,25 @@ def main():
             ))
 
     if found:
+        found.sort(key=lambda x: (-len(x[3]), x[0]))
         lines = [
             f"CS2 扫盘 {latest}",
-            "去除刀皮｜双/三买点共振",
+            "去除刀皮｜单/双/三买点",
             "",
         ]
 
         for name, group, price, types in found:
+            level = f"{len(types)}买点"
+            lines.append(f"{name}｜{group}｜{price:.2f}")
             lines.append(
-                f"{name}｜{group}｜{price:.2f}"
-            )
-            lines.append(
-                f"  {' + '.join(types)}（{len(types)}买点）"
+                f"  {level}：{' + '.join(types)}"
             )
 
         message = "\n".join(lines)
     else:
         message = (
             f"CS2 扫盘 {latest}\n"
-            "未发现满足条件的双/三买点共振。"
+            "未发现满足条件的单/双/三买点。"
         )
 
     print(message)
