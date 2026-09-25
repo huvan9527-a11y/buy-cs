@@ -7,7 +7,9 @@ The API authentication mode is configurable via STEAMDT_AUTH_MODE.
 import csv, json, os, sys, time, urllib.request, urllib.error, urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
+
+SHANGHAI_TZ = timezone(timedelta(hours=8))
 
 API_HOST = os.getenv("STEAMDT_API_HOST", "https://open.steamdt.com")
 API_PATH = os.getenv("STEAMDT_API_PATH", "/open/cs2/item/v1/kline")
@@ -27,7 +29,7 @@ def headers():
     return h
 
 def request_item(name):
-    body = json.dumps({"marketHashName": name, "type": 1, "platform": PLATFORM, "specialStyle": ""}).encode()
+    body = json.dumps({"marketHashName": name, "type": 2, "platform": PLATFORM, "specialStyle": ""}).encode()
     req = urllib.request.Request(API_HOST + API_PATH, data=body, headers=headers(), method="POST")
     with urllib.request.urlopen(req, timeout=45) as r:
         obj = json.loads(r.read().decode("utf-8"))
@@ -49,7 +51,7 @@ def merge_api(rows, name, group, values):
     for a in values:
         if not isinstance(a,(list,tuple)) or len(a)<5: continue
         ts = int(a[0])
-        dt = datetime.fromtimestamp(ts, timezone.utc).date().isoformat()
+        dt = datetime.fromtimestamp(ts, SHANGHAI_TZ).date().isoformat()
         try: vals=list(map(float,a[1:5]))
         except (TypeError,ValueError): continue
         by[(name,dt)]={"marketHashName":name,"group":group,"date":dt,"timestamp":str(ts),"open":vals[0],"close":vals[1],"high":vals[2],"low":vals[3]}
@@ -64,7 +66,7 @@ def merge_into_index(by, name, group, values):
             vals = list(map(float, a[1:5]))
         except (TypeError, ValueError):
             continue
-        dt = datetime.fromtimestamp(ts, timezone.utc).date().isoformat()
+        dt = datetime.fromtimestamp(ts, SHANGHAI_TZ).date().isoformat()
         by[(name, dt)] = {
             "marketHashName": name,
             "group": group,
@@ -95,21 +97,35 @@ def signal_types(g):
             lo=min(l[max(0,j-8):j+1]); hi=max(h[max(0,j-8):j+1]); r=50 if hi==lo else 100*(c[j]-lo)/(hi-lo)
             k.append(r if j==0 else k[-1]*2/3+r/3); d.append(k[j] if j==0 else d[-1]*2/3+k[j]/3)
         return cross(dif,dea,i) and any(cross(k,d,j) for j in range(max(1,i-2),i+1))
-    if macd(12,26,9) or macd(5,12,4): out.append("双金叉")
+    if macd(12, 26, 9): out.append("双金叉 12/26/9")
+    if macd(5, 12, 4): out.append("双金叉 5/12/4")
     # Two MA families: all pairwise crosses within the last 3 bars, final bullish ordering.
     def triple(ps):
         ma=[[sma(c,p,j) for j in range(len(c))] for p in ps]
         if any(v is None for v in [ma[0][i],ma[1][i],ma[2][i]]) or not (ma[0][i]>ma[1][i]>ma[2][i]): return False
         return any(ma[0][j] is not None and ma[1][j] is not None and ma[2][j] is not None and ma[0][j]>ma[1][j] and ma[1][j]>ma[2][j] and (j==0 or not (ma[0][j-1]>ma[1][j-1]>ma[2][j-1])) for j in range(max(0,i-2),i+1))
-    if triple((5,12,21)) or triple((7,14,21)): out.append("均线合一")
+    if triple((5, 12, 21)): out.append("均线合一 MA5/12/21")
+    if triple((7, 14, 21)): out.append("均线合一 MA7/14/21")
     body=abs(c[i-1]-o[i-1]); upper=h[i-1]-max(o[i-1],c[i-1])
     if upper>=body and upper>=.01*c[i-1] and c[i]>h[i-1]: out.append("上影吞没")
-    lower=min(o[i],c[i])-l[i]; body=abs(c[i]-o[i])
-    # A confirmed two/three-day needle requires today's bar to be the follow-through bar.
-    for lag,label in [(2,"2日承接"),(3,"3日承接")]:
-        j=i-lag
-        if j>=0 and min(o[j],c[j])-l[j]>=2*abs(c[j]-o[j]) and min(o[j],c[j])-l[j]>=.02*c[j] and (c[j]-l[j])/max(h[j]-l[j],1e-9)>=.6 and min(l[j+1:i+1])>=l[j] and c[i]>=c[j]:
-            out.append("单针承接"); break
+    # 单针：下影线至少为实体的 20%，并且保留价格占比与上部收盘条件。
+    for lag in (2, 3):
+        j = i - lag
+        if j < 0:
+            continue
+        needle_body = abs(c[j] - o[j])
+        needle_lower = min(o[j], c[j]) - l[j]
+        entity_bottom = min(o[j], c[j])
+        held = min(l[j + 1:i + 1]) >= entity_bottom
+        if (
+            needle_lower >= 0.2 * needle_body
+            and needle_lower >= 0.02 * c[j]
+            and (c[j] - l[j]) / max(h[j] - l[j], 1e-9) >= 0.6
+            and held
+            and c[i] >= c[j]
+        ):
+            out.append("单针承接")
+            break
     return list(dict.fromkeys(out))
 
 def push(text):
@@ -144,6 +160,21 @@ def push(text):
         )
         urllib.request.urlopen(req, timeout=30).read()
 
+def family_count(types):
+    """参数组合分开展示，但同一家族只计一个独立买点。"""
+    families = set()
+    for name in types:
+        if name.startswith("双金叉"):
+            families.add("双金叉")
+        elif name.startswith("均线合一"):
+            families.add("均线合一")
+        elif name == "上影吞没":
+            families.add("上影吞没")
+        elif name == "单针承接":
+            families.add("单针承接")
+    return len(families)
+
+
 def main():
     rows = load_rows()
 
@@ -174,6 +205,7 @@ def main():
     # K线接口限制为每分钟 120 次。
     # 单线程每次间隔 0.60 秒，控制在每分钟约 100 次，避免触发 4005。
     last_request = 0.0
+    scan_started = time.monotonic()
 
     for n, item in enumerate(items, 1):
         wait = 0.60 - (time.monotonic() - last_request)
@@ -215,7 +247,16 @@ def main():
                     )
 
         if n % 50 == 0 or n == total:
-            print(f"fetched {n}/{total}")
+            elapsed = time.monotonic() - scan_started
+            rate = n / elapsed if elapsed > 0 else 0
+            remaining = (total - n) / rate if rate > 0 else 0
+            pct = 100 * n / total if total else 100
+            print(
+                f"progress: {n}/{total} ({pct:.1f}%) | "
+                f"elapsed: {elapsed / 60:.1f} min | "
+                f"ETA: {remaining / 60:.1f} min",
+                flush=True,
+            )
 
     rows = list(row_index.values())
 
@@ -310,7 +351,7 @@ def main():
             ))
 
     if found:
-        found.sort(key=lambda x: (-len(x[3]), x[0]))
+        found.sort(key=lambda x: (-family_count(x[3]), x[0]))
         lines = [
             f"CS2 扫盘 {latest}",
             "去除刀皮｜单/双/三买点",
@@ -318,7 +359,7 @@ def main():
         ]
 
         for name, group, price, types in found:
-            level = f"{len(types)}买点"
+            level = f"{family_count(types)}类买点"
             lines.append(f"{name}｜{group}｜{price:.2f}")
             lines.append(
                 f"  {level}：{' + '.join(types)}"
