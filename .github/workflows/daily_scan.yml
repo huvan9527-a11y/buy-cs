@@ -22,7 +22,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           STEAMDT_AUTH_MODE: bearer
-        run: python3 scanner.py
+        run: python3 -u scanner.py
 
       - name: Commit updated history
         run: |
