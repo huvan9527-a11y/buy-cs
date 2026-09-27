@@ -3,7 +3,7 @@ name: CS2 daily scan
 on:
   workflow_dispatch:
   schedule:
-    - cron: "30 15 * * *"
+    - cron: "0 2 * * *"
 
 permissions:
   contents: write
